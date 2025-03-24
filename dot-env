@@ -1,0 +1,4 @@
+IFIRMA_API_KEY=twoj_sekretny_klucz
+IFIRMA_USERNAME=twoj_login
+IFIRMA_KEY_NAME=faktura
+IFIRMA_URL=https://www.ifirma.pl/iapi/fakturakraj.json
