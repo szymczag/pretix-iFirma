@@ -19,4 +19,4 @@ tags
 [._]*.un~
 
 .env
-
+.csv
