@@ -4,25 +4,21 @@ Skrypt do przesyłania faktur do ifirma przez API.
 Autor: Maciej Szymczak
 Copyright (c) 2025 Maciej Szymczak
 Licencja: MIT License
-Wersja: 1.0.13b
+Wersja: 2.0
 """
 
 __author__ = "Maciej Szymczak"
 __copyright__ = "Copyright (c) 2025 Maciej Szymczak"
 __license__ = "MIT License"
-__version__ = "1.0.13b"
+__version__ = "2.0"
 
 import os
 import json
 import hmac
 import hashlib
 import requests
-from collections import OrderedDict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-
-DEBUG = True
-ADD_NEWLINE = False
 
 load_dotenv()
 
@@ -35,149 +31,79 @@ if not IFIRMA_API_KEY or not IFIRMA_USERNAME:
     raise EnvironmentError("Brak wymaganych zmiennych środowiskowych: IFIRMA_API_KEY lub IFIRMA_USERNAME")
 
 def get_dates():
-    """Zwraca daty: dzisiejsza data oraz termin płatności (7 dni od dziś) w formacie YYYY-MM-DD."""
+    """Zwraca dzisiejszą datę oraz termin płatności (dzisiaj + 7 dni) w formacie YYYY-MM-DD."""
     today = datetime.now()
     today_str = today.strftime("%Y-%m-%d")
     deadline_str = (today + timedelta(days=7)).strftime("%Y-%m-%d")
     return today_str, deadline_str
 
-def compute_hmac(message: str, key_bytes: bytes) -> (str, str):
+def compute_hmac(message: str, key_bytes: bytes) -> str:
+    """Oblicza HMAC-SHA1 dla podanego komunikatu z użyciem klucza (w bajtach) i zwraca wynik jako ciąg hex (lowercase)."""
     hmac_obj = hmac.new(key_bytes, message.encode('utf-8'), hashlib.sha1)
-    return hmac_obj.hexdigest(), hmac_obj.hexdigest().upper()
+    return hmac_obj.hexdigest()
 
 def remove_none_values(d: dict) -> dict:
-    """
-    Rekurencyjnie usuwa z obiektu dict klucze, których wartość to None.
-    """
+    """Rekurencyjnie usuwa z obiektu dict klucze z wartością None."""
     if not isinstance(d, dict):
         return d
     return {k: remove_none_values(v) for k, v in d.items() if v is not None}
 
-def order_position(pos: dict) -> OrderedDict:
-    keys_order = ["StawkaVat", "Ilosc", "CenaJednostkowa", "NazwaPelna", "Jednostka", "TypStawkiVat"]
-    ordered = OrderedDict()
-    for key in keys_order:
-        if key == "StawkaVat" and pos.get("TypStawkiVat") == "ZW":
-            ordered[key] = None
-        elif key in pos:
-            ordered[key] = pos[key]
-    return ordered
-
-def order_contrahent(contr: dict) -> OrderedDict:
-    keys_order = ["Nazwa", "Email", "Telefon", "Ulica", "KodPocztowy", "Kraj", "Miejscowosc", "OsobaFizyczna"]
-    ordered = OrderedDict()
-    for key in keys_order:
-        if key in contr:
-            ordered[key] = contr[key]
-    return ordered
-
-def build_ordered_invoice(invoice: dict) -> OrderedDict:
-    if "Numer" not in invoice:
-        invoice["Numer"] = None
-    keys_order = [
-        "Zaplacono",
-        "LiczOd",
-        "NumerKontaBankowego",
-        "DataWystawienia",
-        "MiejsceWystawienia",
-        "DataSprzedazy",
-        "FormatDatySprzedazy",
-        "TerminPlatnosci",
-        "SposobZaplaty",
-        "NazwaSeriiNumeracji",
-        "NazwaSzablonu",
-        "RodzajPodpisuOdbiorcy",
-        "PodpisOdbiorcy",
-        "PodpisWystawcy",
-        "Uwagi",
-        "WidocznyNumerGios",
-        "Numer",
-        "Pozycje",
-        "Kontrahent"
-    ]
-    ordered = OrderedDict()
-    for key in keys_order:
-        if key not in invoice:
-            continue
-        if key == "Pozycje" and isinstance(invoice[key], list):
-            ordered_positions = []
-            for pos in invoice[key]:
-                ordered_positions.append(order_position(pos))
-            ordered[key] = ordered_positions
-        elif key == "Kontrahent" and isinstance(invoice[key], dict):
-            ordered[key] = order_contrahent(invoice[key])
-        else:
-            ordered[key] = invoice[key]
-    return ordered
+def order_position(pos: dict) -> dict:
+    """
+    Jeśli TypStawkiVat ma wartość "ZW", ustaw StawkaVat na None.
+    """
+    if pos.get("TypStawkiVat") == "ZW":
+        pos["StawkaVat"] = None
+    return pos
 
 def upload_invoice(invoice: dict) -> None:
-    # Usuń pole "Status"
+    # Usuwamy pole "Status", jeśli istnieje.
     invoice.pop("Status", None)
-    # Ustaw NumerKontaBankowego na "BRAK", jeśli jest None.
+    # Jeśli NumerKontaBankowego jest pusty, ustawiamy na "BRAK".
     if invoice.get("NumerKontaBankowego") is None:
         invoice["NumerKontaBankowego"] = "BRAK"
-    # Czyść pole "Telefon" w obiekcie Kontrahent.
-    kontrahent = invoice.get("Kontrahent", {})
-    if "Telefon" in kontrahent:
-        kontrahent["Telefon"] = kontrahent["Telefon"].replace("'", "").strip()
-        invoice["Kontrahent"] = kontrahent
-    
-    # Nadpisz daty na dzisiejsze
+    # Czyszczenie pola "Telefon" w obiekcie Kontrahent.
+    if "Kontrahent" in invoice and isinstance(invoice["Kontrahent"], dict):
+        if "Telefon" in invoice["Kontrahent"]:
+            invoice["Kontrahent"]["Telefon"] = invoice["Kontrahent"]["Telefon"].replace("'", "").strip()
+
+    # Nadpisujemy daty na bieżące.
     today_str, deadline_str = get_dates()
     invoice["DataWystawienia"] = today_str
     invoice["DataSprzedazy"] = today_str
     invoice["TerminPlatnosci"] = deadline_str
 
+    # Dla każdej pozycji faktury, ustawiamy StawkaVat na None, jeśli TypStawkiVat == "ZW".
+    if "Pozycje" in invoice and isinstance(invoice["Pozycje"], list):
+        invoice["Pozycje"] = [order_position(pos) for pos in invoice["Pozycje"]]
+
     invoice = remove_none_values(invoice)
-    ordered_invoice = build_ordered_invoice(invoice)
-    
-    request_content = json.dumps(ordered_invoice, separators=(',', ':'), ensure_ascii=False)
-    if ADD_NEWLINE:
-        request_content = request_content.rstrip() + "\n"
-    else:
-        request_content = request_content.rstrip()
-    
+    request_content = json.dumps(invoice, separators=(',', ':'), ensure_ascii=False).rstrip()
+
+    # Budujemy ciąg do podpisania: IFIRMA_URL + IFIRMA_USERNAME + IFIRMA_KEY_NAME + request_content
     message = IFIRMA_URL + IFIRMA_USERNAME + IFIRMA_KEY_NAME + request_content
-    
+
+    # Konwertujemy klucz API z postaci heksadecymalnej na bajty.
     key_bytes = bytes.fromhex(IFIRMA_API_KEY)
-    hash_lower, hash_upper = compute_hmac(message, key_bytes)
-    hmac_hash = hash_lower
-    
+    hmac_hash = compute_hmac(message, key_bytes)
+
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json; charset=UTF-8",
         "Authentication": f"IAPIS user={IFIRMA_USERNAME}, hmac-sha1={hmac_hash}"
     }
-    
-    if DEBUG:
-        print("=== DEBUG ===")
-        print("Request content (JSON):")
-        print(request_content)
-        print("\nCiąg do podpisania:")
-        print(message)
-        print("\nObliczony hash (lowercase):")
-        print(hash_lower)
-        print("Obliczony hash (uppercase):")
-        print(hash_upper)
-        print("Nagłówki:")
-        for key, value in headers.items():
-            print(f"{key}: {value}")
-        print("=== KONIEC DEBUGU ===\n")
-    
+
     try:
         response = requests.post(IFIRMA_URL, data=request_content.encode('utf-8'), headers=headers, timeout=300)
         response.raise_for_status()
-        print(f"Faktura została pomyślnie dodana. Odpowiedź: {response.text}")
+        # Wyświetl informacje o fakturze, dla której wykonano żądanie.
+        print(f"Faktura (kod: {invoice.get('Uwagi')}, kontrahent: {invoice.get('Kontrahent', {}).get('Nazwa')}) została dodana. Odpowiedź: {response.text}")
     except requests.exceptions.RequestException as e:
-        print(f"Błąd przy wysyłaniu faktury: {e}\nOdpowiedź: {getattr(e, 'response', 'Brak odpowiedzi')}")
+        print(f"Błąd przy wysyłaniu faktury (kod: {invoice.get('Uwagi')}, kontrahent: {invoice.get('Kontrahent', {}).get('Nazwa')}): {e}\nOdpowiedź: {getattr(e, 'response', 'Brak odpowiedzi')}")
 
 def main():
-    try:
-        with open("ifirma_invoices.json", "r", encoding="utf-8") as f:
-            invoices = json.load(f)
-    except Exception as e:
-        raise FileNotFoundError(f"Nie udało się wczytać pliku ifirma_invoices.json: {e}")
-    
+    with open("ifirma_invoices.json", "r", encoding="utf-8") as f:
+        invoices = json.load(f)
     print(f"Wczytano {len(invoices)} faktur do przesłania.")
     for invoice in invoices:
         upload_invoice(invoice)
