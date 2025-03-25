@@ -4,13 +4,13 @@ Skrypt do przesyłania faktur do ifirma przez API.
 Autor: Maciej Szymczak
 Copyright (c) 2025 Maciej Szymczak
 Licencja: MIT License
-Wersja: 1.0.11
+Wersja: 1.0.13b
 """
 
 __author__ = "Maciej Szymczak"
 __copyright__ = "Copyright (c) 2025 Maciej Szymczak"
 __license__ = "MIT License"
-__version__ = "1.0.11"
+__version__ = "1.0.13b"
 
 import os
 import json
@@ -18,6 +18,7 @@ import hmac
 import hashlib
 import requests
 from collections import OrderedDict
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 DEBUG = True
@@ -33,15 +34,32 @@ IFIRMA_URL = os.getenv("IFIRMA_URL", "https://www.ifirma.pl/iapi/fakturakraj.jso
 if not IFIRMA_API_KEY or not IFIRMA_USERNAME:
     raise EnvironmentError("Brak wymaganych zmiennych środowiskowych: IFIRMA_API_KEY lub IFIRMA_USERNAME")
 
-def compute_hmac(message: str, key: str) -> (str, str):
-    hmac_obj = hmac.new(key.encode('utf-8'), message.encode('utf-8'), hashlib.sha1)
+def get_dates():
+    """Zwraca daty: dzisiejsza data oraz termin płatności (7 dni od dziś) w formacie YYYY-MM-DD."""
+    today = datetime.now()
+    today_str = today.strftime("%Y-%m-%d")
+    deadline_str = (today + timedelta(days=7)).strftime("%Y-%m-%d")
+    return today_str, deadline_str
+
+def compute_hmac(message: str, key_bytes: bytes) -> (str, str):
+    hmac_obj = hmac.new(key_bytes, message.encode('utf-8'), hashlib.sha1)
     return hmac_obj.hexdigest(), hmac_obj.hexdigest().upper()
+
+def remove_none_values(d: dict) -> dict:
+    """
+    Rekurencyjnie usuwa z obiektu dict klucze, których wartość to None.
+    """
+    if not isinstance(d, dict):
+        return d
+    return {k: remove_none_values(v) for k, v in d.items() if v is not None}
 
 def order_position(pos: dict) -> OrderedDict:
     keys_order = ["StawkaVat", "Ilosc", "CenaJednostkowa", "NazwaPelna", "Jednostka", "TypStawkiVat"]
     ordered = OrderedDict()
     for key in keys_order:
-        if key in pos:
+        if key == "StawkaVat" and pos.get("TypStawkiVat") == "ZW":
+            ordered[key] = None
+        elif key in pos:
             ordered[key] = pos[key]
     return ordered
 
@@ -54,7 +72,6 @@ def order_contrahent(contr: dict) -> OrderedDict:
     return ordered
 
 def build_ordered_invoice(invoice: dict) -> OrderedDict:
-    # Jeśli pole "Numer" nie istnieje, ustaw je jawnie na None
     if "Numer" not in invoice:
         invoice["Numer"] = None
     keys_order = [
@@ -94,33 +111,37 @@ def build_ordered_invoice(invoice: dict) -> OrderedDict:
     return ordered
 
 def upload_invoice(invoice: dict) -> None:
-    # Usuń pole "Status" – nie jest częścią specyfikacji ifirma.
+    # Usuń pole "Status"
     invoice.pop("Status", None)
-    
-    # Ustaw NumerKontaBankowego na "BRAK", jeśli jest puste.
+    # Ustaw NumerKontaBankowego na "BRAK", jeśli jest None.
     if invoice.get("NumerKontaBankowego") is None:
         invoice["NumerKontaBankowego"] = "BRAK"
-    
     # Czyść pole "Telefon" w obiekcie Kontrahent.
     kontrahent = invoice.get("Kontrahent", {})
     if "Telefon" in kontrahent:
         kontrahent["Telefon"] = kontrahent["Telefon"].replace("'", "").strip()
         invoice["Kontrahent"] = kontrahent
+    
+    # Nadpisz daty na dzisiejsze
+    today_str, deadline_str = get_dates()
+    invoice["DataWystawienia"] = today_str
+    invoice["DataSprzedazy"] = today_str
+    invoice["TerminPlatnosci"] = deadline_str
 
-    # Budujemy uporządkowany obiekt faktury.
+    invoice = remove_none_values(invoice)
     ordered_invoice = build_ordered_invoice(invoice)
     
-    # Generujemy ciąg JSON z uporządkowanym obiektem.
     request_content = json.dumps(ordered_invoice, separators=(',', ':'), ensure_ascii=False)
     if ADD_NEWLINE:
         request_content = request_content.rstrip() + "\n"
     else:
         request_content = request_content.rstrip()
     
-    # Budujemy ciąg do podpisania: IFIRMA_URL + IFIRMA_USERNAME + IFIRMA_KEY_NAME + request_content
     message = IFIRMA_URL + IFIRMA_USERNAME + IFIRMA_KEY_NAME + request_content
-    hash_lower, hash_upper = compute_hmac(message, IFIRMA_API_KEY)
-    hmac_hash = hash_lower  # używamy lowercase
+    
+    key_bytes = bytes.fromhex(IFIRMA_API_KEY)
+    hash_lower, hash_upper = compute_hmac(message, key_bytes)
+    hmac_hash = hash_lower
     
     headers = {
         "Accept": "application/json",
